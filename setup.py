@@ -1,10 +1,11 @@
-from distutils.core import setup
+from setuptools import setup
 
 setup(
     name='deckpie',
     version='0.1',
-    packages=[''],
-    package_dir={'': 'deckpie'},
+    requires=['PyDAQmx', 'numpy', 'scipy'],
+    packages=[],
+    package_dir={},
     url='',
     license='',
     author='Keji Li',

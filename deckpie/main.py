@@ -9,17 +9,19 @@ def list_dev(is_print=True):
     name_buffer = bytes(128)
     PyDAQmx.DAQmxGetSysDevNames(name_buffer, 128)
     names = name_buffer[0:name_buffer.find(b"\x00")].split(b", ")
-    for name in names:
-        print(name)
+    if is_print:
+        for name in names:
+            print(name)
     return names
 
 
-def list_chan(dev_name: bytes):
+def list_chan(dev_name: bytes, is_print=True):
     name_buffer = bytes(1024)
     PyDAQmx.DAQmxGetDevAIPhysicalChans(bytes(dev_name), name_buffer, 1024)
     names = name_buffer[0:name_buffer.find(b"\x00")].split(b", ")
-    for name in names:
-        print(name)
+    if is_print:
+        for name in names:
+            print(name)
     return names
 
 
@@ -66,3 +68,20 @@ def find_rising_edge(series):
     full_signals = np.zeros((256 - len(signals),))
     full_signals = np.append(full_signals, signals)
     return full_signals
+
+
+def calibrate_diode(series, diode_max=256):
+    from scipy import signal
+
+    onset = signal.argrelextrema(series, np.less_equal)[0]
+    onset = onset[:-1][np.diff(onset) > 2]
+    onset = np.delete(onset, np.nonzero(np.diff(onset) < 10)[0] + 1)
+    peak = signal.argrelextrema(series, np.greater_equal)[0]
+    peak = peak[:-1][np.diff(peak) > 2]
+    peak = np.delete(peak, np.nonzero(np.diff(peak) < 15)[0])
+    assert (len(onset) == len(peak))
+    signal_size = series[peak] - series[onset]
+    threshold = signal_size * 0.1
+    last_reliable = np.nonzero((series[onset] - series[onset[0]]) > threshold)[0][0]
+    mid_reliable = np.searchsorted(signal_size, signal_size[last_reliable] / 2) + 1
+    return 1 - (len(signal_size) - mid_reliable) / diode_max, 1 - (len(signal_size) - last_reliable) / diode_max
