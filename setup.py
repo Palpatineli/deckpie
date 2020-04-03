@@ -1,3 +1,7 @@
+"""interfacing with NIDAQ DAC board, and autocalibrate diode input
+author: mail@keji.li
+"""
+
 from setuptools import setup
 
 setup(
@@ -6,6 +10,7 @@ setup(
     requires=['PyDAQmx', 'numpy', 'scipy'],
     packages=[],
     package_dir={},
+    entry_points={'console_scripts': ['diode_calibrate=deckpie.main:auto']},
     url='',
     license='',
     author='Keji Li',

@@ -1,8 +1,15 @@
 #!/user/bin/env python3
-"""record diode signal from National Instrument DAQmx and calculate the correct pixel level to use for OI synchronization
+"""record diode signal from National Instrument DAQmx and calculate the correct pixel level to use
+for OI synchronization
 """
+import time
+import socket
+import atexit
+# pylint: disable=import-error
 import PyDAQmx
+# pylint: enable=import-error
 import numpy as np
+from . import tcp
 
 
 def list_dev(is_print=True):
@@ -25,63 +32,71 @@ def list_chan(dev_name: bytes, is_print=True):
     return names
 
 
-def record(device=b'cDAQ1Mod1/ai0', time=20, frequency=1000.0):
+def record(duration: int=20, device: str='cDAQ1Mod1/ai0', frequency: float=1000.0) -> \
+        (np.ndarray, (float, float)):
+    """record a fixed length waveform from specified device
+    Args:
+        duration: the total duration of recording in seconds
+        device: the nidaq device name, usually is "boardname/channelname", boardname is usually
+            cDAQ#[Mod#], and channelname is usually ai#, ao#, di#, or do#
+        frequency: sampling frequency of input channels
+    Returns:
+        (sample time series, (computer start_time, computer, end_time))
+    """
     analog_input = PyDAQmx.Task()
-    read = PyDAQmx.int32()
-    total_sample_no = round(time * frequency)
+    total_sample_no = round(duration * frequency)
     data = np.zeros((total_sample_no,), dtype=np.float64)
 
     # DAQmx Configure Code
-    analog_input.CreateAIVoltageChan(device, b"", PyDAQmx.DAQmx_Val_Cfg_Default, -10.0, 10.0, PyDAQmx.DAQmx_Val_Volts,
-                                     None)
-    analog_input.CfgSampClkTiming(b"", frequency, PyDAQmx.DAQmx_Val_Rising, PyDAQmx.DAQmx_Val_FiniteSamps,
-                                  np.uint64(total_sample_no))
+    analog_input.CreateAIVoltageChan(str.encode(device), b"", PyDAQmx.DAQmx_Val_Cfg_Default,
+                                     -10.0, 10.0, PyDAQmx.DAQmx_Val_Volts, None)
+    analog_input.CfgSampClkTiming(b"", frequency, PyDAQmx.DAQmx_Val_Rising,
+                                  PyDAQmx.DAQmx_Val_FiniteSamps, np.uint64(total_sample_no))
     # Wait for User Input to start
     result = input(
-        "NiDaq box ready to run {0}s at {1}Hz. Press Enter to start recording. input (a)bort to quit.".format(time,
-                                                                                                              frequency))
+        "NiDaq box ready to run {0}s at {1}Hz. Press Enter to start recording. "
+        "input (a)bort to quit.".format(duration, frequency))
     if len(result) > 0 and result[0] == 'a':
         import sys
         sys.exit(0)
+    start_time = time.time()
     # DAQmx Start Code
     analog_input.StartTask()
+    end_time = time.time()
     # DAQmx Read Code
-    analog_input.ReadAnalogF64(total_sample_no, float(time), PyDAQmx.DAQmx_Val_GroupByChannel, data, total_sample_no,
-                               PyDAQmx.byref(read), None)
+    read_size = PyDAQmx.int32()
+    analog_input.ReadAnalogF64(total_sample_no, float(duration), PyDAQmx.DAQmx_Val_GroupByChannel,
+                               data, total_sample_no, PyDAQmx.byref(read_size), None)
     print("Recording finished")
-    return data
+    return data, (start_time, end_time)
 
 
-def find_rising_edge(series):
-    onset_index = np.logical_and(series[2:] > series[1:-1], series[0:-2] >= series[1:-1])
-    onset = (series[1:-1])[onset_index]
-    peak_index = np.logical_and(series[2:] <= series[1:-1], series[0:-2] < series[1:-1])
-    peak = (series[1:-1])[peak_index]
-    assert (len(peak) == len(onset))
-    signals = peak - onset
-    if len(onset) < 2:
-        print("no diode signal detected")
+def diode_test_signal(series):
+    diff = np.diff(series)
+    onset_index = np.nonzero(np.logical_and(diff[1:] > 0, diff[:-1] <= 0))[0] + 1
+    peak_index = np.nonzero(np.logical_and(diff[1:] <= 0, diff[:-1] > 0))[0] + 1
+    assert len(peak_index) == len(onset_index)
+    assert len(onset_index) > 1, "no diode signal detected"
+    return series[peak_index] - series[onset_index]
+
+
+def time_negotiate(port, min_wait=0.01):
+    target_time = float(port.receive())
+    wait_time = target_time - time.time()
+    if wait_time < min_wait:
+        port.send(b'fuck')
     else:
-        print("diode base is {0}, with {1} std".format(onset.mean(), onset.std()))
-        print("1/3 strength pixel at {0}, with strength {1}".format(255 - round(len(signals) * (2 / 3)),
-                                                                    signals[round(len(signals) / 3)]))
-    full_signals = np.zeros((256 - len(signals),))
-    full_signals = np.append(full_signals, signals)
-    return full_signals
+        port.send(b'ok')
+    time.sleep(target_time - time.time())
 
 
-def calibrate_diode(series, diode_max=256):
-    from scipy import signal
-
-    onset = signal.argrelextrema(series, np.less_equal)[0]
-    onset = onset[:-1][np.diff(onset) > 2]
-    onset = np.delete(onset, np.nonzero(np.diff(onset) < 10)[0] + 1)
-    peak = signal.argrelextrema(series, np.greater_equal)[0]
-    peak = peak[:-1][np.diff(peak) > 2]
-    peak = np.delete(peak, np.nonzero(np.diff(peak) < 15)[0])
-    assert (len(onset) == len(peak))
-    signal_size = series[peak] - series[onset]
-    threshold = signal_size * 0.1
-    last_reliable = np.nonzero((series[onset] - series[onset[0]]) > threshold)[0][0]
-    mid_reliable = np.searchsorted(signal_size, signal_size[last_reliable] / 2) + 1
-    return 1 - (len(signal_size) - mid_reliable) / diode_max, 1 - (len(signal_size) - last_reliable) / diode_max
+def auto(port_id: int=32):
+    import json
+    import pkg_resources
+    tcp_config = json.load(open(pkg_resources.resource_string('deckpie', 'config.json')))
+    print('connecting stimulator...')
+    with tcp.TcpServer(tcp_config['client_computer']) as port:
+        port.connect()
+        print('stimulator connected.')
+        while True:
+            time_negotiate(port)
